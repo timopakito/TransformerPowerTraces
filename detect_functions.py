@@ -6,9 +6,15 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import numpy as np
 from models.transformer1 import PowerTraceTransformer
-from datasets.load_power_traces import ApplicationTraceDataset
-from TransformerPowerTrace.train import full_dataset
+from datasets.load_power_traces import ApplicationTraceDataset, PowerTraceDataset
+
 from torch.utils.data import DataLoader
+
+# === Config
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BATCH_SIZE = 1
+MODEL_PATH = "weights/best_model_bis.pth"
+DATA_DIR = "Data"
 
 
 def detect_functions_in_trace(model, trace_tensor, label_map, device, window_size=256, step_size=128, confidence_thresh=0.7):
@@ -79,12 +85,12 @@ def detect_functions_in_trace(model, trace_tensor, label_map, device, window_siz
     return f"📈 Lecture de la power trace...\nDétection des fonctions : {functions_str}. (graphe sauvegardé dans 'detected_functions_plot.png')"
 
 #Charger le modèle entraîné
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = PowerTraceTransformer()
-model.load_state_dict(torch.load('weights/best_model_bis.pth', map_location=device))
-model = model.to(device)
+full_dataset = PowerTraceDataset(DATA_DIR) 
+model = PowerTraceTransformer(num_classes=len(full_dataset.label_map)).to(device)
+model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+model.eval()
 
-app_dataset = ApplicationTraceDataset("Data/Power_consumption_application")
+app_dataset = ApplicationTraceDataset("Data/Applications")
 app_loader = DataLoader(app_dataset, batch_size=1, shuffle=False)
 label_map = full_dataset.label_map  # si tu as déjà chargé le dataset labellisé
 
