@@ -6,7 +6,6 @@ from models.transformer1 import PowerTraceTransformer
 from torch.utils.data import random_split
 import torch.nn as nn
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
-from visualization.attention_visualization import visualize_attention_signal
 from sklearn.model_selection import StratifiedShuffleSplit
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -27,7 +26,7 @@ n_val = n - n_train
 
 # Liste des labels
 labels = full_dataset.labels  # ← déjà dispo dans PowerTraceDataset
-sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=123)
 train_idx, val_idx = next(sss.split(X=range(len(labels)), y=labels))
 
 train_subset = Subset(full_dataset, train_idx)
@@ -138,6 +137,8 @@ def validate(model, val_loader, criterion, device, window_size=512, step_size=25
 
     acc = correct / total
     avg_loss = val_loss / total
+    print("🧾 Distribution des vraies classes dans le set de validation :")
+    print(np.bincount(all_labels, minlength=len(full_dataset.label_map)))
     return acc, avg_loss, all_preds, all_labels, attention_data
 
 #Entrainement 
