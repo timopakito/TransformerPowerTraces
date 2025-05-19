@@ -180,17 +180,65 @@ for epoch in range(5):
 # === Sauvegarde des poids d'attention ===
 df_attention = pd.DataFrame(attention_data)
 
-# ⚠️ Assure-toi que attention_weights est une liste de listes de floats
+
+# Fonction pour convertir et valider les poids d'attention
 def safe_json_dumps(val):
     try:
-        return json.dumps(val)
-    except Exception:
-        return "[]"
+        # Log the raw value for debugging
+        #print(f"Serializing value: {val} (type: {type(val)})")
 
+        # Convertir en liste Python
+        if isinstance(val, (np.ndarray, torch.Tensor)):
+            val = val.tolist()  # Convertir numpy array ou tenseur en liste
+        elif isinstance(val, (list, tuple)):
+            val = list(val)  # Convertir tuple en liste
+        else:
+            raise ValueError(f"Invalid type for attention weights: {type(val)}")
+
+        # Si val est une liste vide, la gÃ©rer explicitement
+        if not val:
+            raise ValueError("Attention weights list is empty")
+
+        # Convertir rÃ©cursivement les arrays imbriquÃ©s en listes
+        def convert_nested_arrays(obj):
+            if isinstance(obj, (np.ndarray, torch.Tensor)):
+                return obj.tolist()
+            elif isinstance(obj, list):
+                return [convert_nested_arrays(item) for item in obj]
+            elif isinstance(obj, (int, float)):
+                return obj
+            else:
+                raise ValueError(f"Invalid type in attention weights: {type(obj)}")
+
+        val = convert_nested_arrays(val)
+
+        # VÃ©rifier que c'est une liste de listes de nombres
+        if not all(isinstance(sublist, list) for sublist in val):
+            #print(f"Converting flat list to list of lists: {val}")
+            val = [val]  # Envelopper une liste plate, si nÃ©cessaire
+
+        if not all(all(isinstance(x, (int, float)) for x in sublist) for sublist in val):
+            raise ValueError("Attention weights must contain only numbers")
+
+        # SÃ©rialiser en JSON
+        serialized = json.dumps(val)
+        #print(f"Serialized successfully: {serialized}")
+        return serialized
+
+    except Exception as e:
+        print(f"âš ï¸ Erreur lors de la sÃ©rialisation des poids d'attention: {str(e)} (value: {val})")
+        return "[]"  # Retourner une liste vide seulement en cas d'erreur explicite
+
+# Appliquer la conversion et sÃ©rialisation
 df_attention["attention_weights"] = df_attention["attention_weights"].apply(safe_json_dumps)
 
-df_attention.to_csv("attention_weights.csv", index=False)
+'''# Vérifier le contenu après sérialisation
+print("df_attention after serialization:")
+print(df_attention["attention_weights"])'''
 
+# Sauvegarder dans le CSV
+df_attention.to_csv("attention_weights.csv", index=False)
+print("✅ Poids d'attention sauvegardés dans attention_weights.csv")
 
 # === Rapport de classification ===
 print("\n\n=== Rapport de classification ===")
