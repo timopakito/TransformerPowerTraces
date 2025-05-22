@@ -5,6 +5,8 @@ import numpy as np
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
+import random
+from collections import defaultdict
 
 class PowerTraceDataset(Dataset):
     def __init__(self, data_dir, file_suffix="_all.csv", normalize=True):
@@ -53,66 +55,6 @@ def collate_fn(batch):
     lengths = torch.tensor([seq.size(0) for seq in sequences])
     attention_mask = torch.arange(padded_seqs.size(1)).unsqueeze(0) < lengths.unsqueeze(1)  # (B, T_max)
     return padded_seqs, torch.tensor(labels), attention_mask
-
-class PowerTraceDatasetFixedLength(Dataset):
-    def __init__(self, data_dir, file_suffix="_all.csv", normalize=True, fixed_length=512):
-        self.traces = []
-        self.masks = []
-        self.labels = []
-        self.label_map = {}
-        self.fixed_length = fixed_length
-
-        files = sorted([f for f in os.listdir(data_dir) if f.endswith(file_suffix)])
-
-        for label_id, filename in enumerate(files):
-            function_name = filename.replace(file_suffix, "")
-            self.label_map[label_id] = function_name
-
-            print(f"Chargement : {filename} → label {label_id} ({function_name})")
-
-            df = pd.read_csv(os.path.join(data_dir, filename))
-            df = df.select_dtypes(include=[np.number])
-            df = df.dropna(axis=1, how='any')
-            arr = df.to_numpy(dtype=np.float32)
-
-            if normalize:
-                arr = (arr - arr.mean(axis=1, keepdims=True)) / (arr.std(axis=1, keepdims=True) + 1e-8)
-
-            for trace in arr:
-                trace_tensor = torch.tensor(trace, dtype=torch.float32)
-                padded, mask = self.pad_or_crop(trace_tensor)
-                self.traces.append(padded.unsqueeze(-1))  # (T, 1)
-                self.masks.append(mask)
-                self.labels.append(label_id)
-
-    def pad_or_crop(self, trace):
-        L = trace.shape[0]
-        if L >= self.fixed_length:
-            start = torch.randint(0, L - self.fixed_length + 1, (1,)).item()
-            trace = trace[start:start + self.fixed_length]
-            mask = torch.ones(self.fixed_length, dtype=torch.bool)
-        else:
-            padded = torch.zeros(self.fixed_length)
-            padded[:L] = trace
-            trace = padded
-            mask = torch.zeros(self.fixed_length, dtype=torch.bool)
-            mask[:L] = True
-        return trace, mask
-
-    def __len__(self):
-        return len(self.traces)
-
-    def __getitem__(self, idx):
-        return self.traces[idx], self.masks[idx], self.labels[idx]
-
-def collate_fn_fixed(batch):
-    traces, masks, labels = zip(*batch)
-    return (
-        torch.stack(traces),
-        torch.tensor(labels),
-        torch.stack(masks).to(torch.bool)
-        
-    )
 
 class PowerTraceDatasetSlidingWindow(Dataset):
     def __init__(self, data_dir, file_suffix="_all.csv", normalize=True, window_size=512, step_size=256):
@@ -224,6 +166,7 @@ class SlidingWindowWrapper(Dataset):
         label = self.labels[idx]
         mask = torch.ones(self.window_size, dtype=torch.bool)
         return trace, label, mask 
+    
 def collate_fn_val(batch):
     sequences, labels = zip(*batch)  # batch_size = 1
     return sequences[0], labels[0]
@@ -279,7 +222,7 @@ def collate_fn_unified(batch):
     return traces, labels, masks
 
 class ApplicationTraceDataset(Dataset):
-    def __init__(self, data_dir, file_suffix="_app.csv", normalize=True):
+    def __init__(self, data_dir, file_suffix=".csv", normalize=True):
         """
         Dataset pour les power traces d'application non labellisées.
 
@@ -294,7 +237,12 @@ class ApplicationTraceDataset(Dataset):
         print(f"📦 Fichiers chargés : {files}")
 
         for filename in files:
-            df = pd.read_csv(os.path.join(data_dir, filename))
+            try:
+                df = pd.read_csv(os.path.join(data_dir, filename), on_bad_lines='skip')
+            except Exception as e:
+                print(f"❌ Erreur dans {filename} : {e}")
+                continue
+
             df = df.select_dtypes(include=["number"]).dropna(axis=1)
             arr = df.to_numpy(dtype=np.float32)
 
@@ -310,3 +258,34 @@ class ApplicationTraceDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.traces[idx]  # (T,)
+
+class BalancedSegmentDataset(Dataset):
+    def __init__(self, datasets, segments_per_class):
+        """
+        datasets : liste de datasets contenant chacun des tuples (trace, label, mask)
+        segments_per_class : int, nombre de segments à conserver pour chaque classe
+        """
+        self.samples = []
+        class_buckets = defaultdict(list)
+
+        # Regroupe tous les segments par classe
+        for dataset in datasets:
+            for trace, label, mask in dataset:
+                class_buckets[label].append((trace, label, mask))
+
+        # Pour chaque classe, échantillonne les segments
+        for label, samples in class_buckets.items():
+            if len(samples) >= segments_per_class:
+                selected = random.sample(samples, segments_per_class)  # Sous-échantillonnage
+            else:
+                # Sur-échantillonnage si classe minoritaire
+                selected = random.choices(samples, k=segments_per_class)
+            self.samples.extend(selected)
+
+        random.shuffle(self.samples)  # Mélange pour éviter les blocs par classe
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
