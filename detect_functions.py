@@ -1,103 +1,87 @@
-# detect_functions.py
-
+import os
 import torch
 import torch.nn.functional as F
-from collections import Counter
-import matplotlib.pyplot as plt
+import pandas as pd
 import numpy as np
 from models.transformer1 import PowerTraceTransformer
-from datasets.load_power_traces import ApplicationTraceDataset, PowerTraceDataset
+from datasets.load_power_traces import PowerTraceDataset
 
-from torch.utils.data import DataLoader
-
-# === Config
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 1
-MODEL_PATH = "weights/best_model_bis.pth"
-DATA_DIR = "Data"
+def load_label_map(data_dir="Data", file_suffix="_all.csv"):
+    """Charge le mapping label_id -> nom de fonction depuis le Dataset monofonction."""
+    full_ds = PowerTraceDataset(data_dir, file_suffix=file_suffix)
+    return full_ds.label_map
 
 
-def detect_functions_in_trace(model, trace_tensor, label_map, device, window_size=256, step_size=128, confidence_thresh=0.7):
+from collections import Counter
+
+def predict_application_function(trace, model, device,
+                                 window_size=512, step_size=256):
     """
-    Donne une power trace d'application (Tensor 1D), détecte les fonctions reconnues à l'intérieur.
-    Retourne un message listant les fonctions détectées avec confiance suffisante
-    et affiche un graphe avec segments colorés par fonction reconnue.
+    Applique le modèle à une trace d'application (1D Tensor) en la découpant en segments,
+    et retourne une prédiction par segment (via argmax sur les logits).
+
+    Returns:
+        segment_preds (List[int]): liste des classes prédites pour chaque segment.
     """
-    model.eval()  # Mode évaluation : désactive le dropout, etc.
-    trace_tensor = trace_tensor.to(device)  # Envoie la trace sur le device (GPU ou CPU)
-    L = trace_tensor.size(0)  # Longueur totale de la trace
+    L = trace.size(0)
 
-    detected_segments = []  # Stockera les segments reconnus sous forme (start, end, label)
+    model.eval()
+    segment_preds = []
 
-    with torch.no_grad():  # Pas de calcul de gradient (inférence uniquement)
+    with torch.no_grad():
+        # Fenêtres glissantes
         for start in range(0, L - window_size + 1, step_size):
-            # Découpe un segment glissant de taille `window_size`
-            segment = trace_tensor[start:start + window_size]
-            segment = segment.unsqueeze(0).unsqueeze(-1)  # Devient un batch de forme (1, window_size, 1)
-            mask = torch.ones(1, window_size, dtype=torch.bool).to(device)  # Masque d'attention (tout activé)
+            seg = trace[start:start + window_size]
+            x = seg.unsqueeze(0).unsqueeze(-1)  # (1, window_size, 1)
+            mask = torch.ones(1, window_size, dtype=torch.bool, device=device)
 
-            out = model(segment, mask)  # Prédiction du modèle : logits (1, num_classes)
-            probs = F.softmax(out, dim=1).squeeze(0)  # Convertit en probabilités, puis enlève la dimension batch
+            out = model(x, mask).squeeze(0)  # (num_classes,)
+            pred_class = out.argmax().item()
+            segment_preds.append(pred_class)
 
-            top_prob = probs.max().item()  # Confiance maximale
-            top_class = probs.argmax().item()  # Classe prédite
+        # Fenêtre finale si reste
+        if L % window_size != 0:
+            last = trace[-window_size:]
+            x = last.unsqueeze(0).unsqueeze(-1)
+            mask = torch.zeros(1, window_size, dtype=torch.bool, device=device)
+            valid = L % window_size
+            mask[0, -valid:] = True
 
-            if top_prob >= confidence_thresh:
-                # Si confiance suffisante, on garde ce segment
-                detected_segments.append((start, start + window_size, top_class))
+            out = model(x, mask).squeeze(0)
+            pred_class = out.argmax().item()
+            segment_preds.append(pred_class)
 
-    if not detected_segments:
-        return "📉 Lecture de la power trace...\nAucune fonction connue détectée."
+    if not segment_preds:
+        raise ValueError(f"Trace trop courte pour taille de fenêtre {window_size}")
 
-    # === Analyse des fonctions détectées ===
-    detected_labels = [label for (_, _, label) in detected_segments]  # On ne garde que les labels
-    function_counts = Counter(detected_labels)  # Compte les occurrences de chaque fonction
-    sorted_classes = [label_map[c] for c, _ in function_counts.most_common()]  # Trie par fréquence
-
-    # === Visualisation ===
-    trace_np = trace_tensor.cpu().numpy()  # Conversion en numpy pour matplotlib
-    x = np.arange(len(trace_np))  # Axe des abscisses
-
-    plt.figure(figsize=(12, 4))
-    plt.plot(x, trace_np, label="Power Trace", color="lightgray")  # Trace complète en fond
-
-    color_map = plt.get_cmap("tab10")  # Palette de couleurs (une par fonction)
-    for i, (start, end, label) in enumerate(detected_segments):
-        # Colorie chaque segment reconnu avec la couleur associée
-        plt.plot(x[start:end], trace_np[start:end], color=color_map(label), label=label_map[label])
-
-    # Supprimer les doublons dans la légende
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    plt.legend(by_label.values(), by_label.keys())
-
-    # Ajouts esthétiques
-    plt.title("Fonctions détectées dans la power trace")
-    plt.xlabel("Temps")
-    plt.ylabel("Amplitude")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("detected_functions_plot.png")  # Enregistrement
-    plt.close()
-
-    # Message utilisateur
-    functions_str = " et ".join(sorted_classes)
-    return f"📈 Lecture de la power trace...\nDétection des fonctions : {functions_str}. (graphe sauvegardé dans 'detected_functions_plot.png')"
-
-#Charger le modèle entraîné
-full_dataset = PowerTraceDataset(DATA_DIR) 
-model = PowerTraceTransformer(num_classes=len(full_dataset.label_map)).to(device)
-model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-model.eval()
-
-app_dataset = ApplicationTraceDataset("Data/Applications")
-app_loader = DataLoader(app_dataset, batch_size=1, shuffle=False)
-label_map = full_dataset.label_map  # si tu as déjà chargé le dataset labellisé
-
-# Exemple : appliquer le détecteur
-for trace_tensor in app_loader:
-    trace_tensor = trace_tensor.squeeze(0)  # (T,)
-    message = detect_functions_in_trace(model, trace_tensor, label_map, device)
-    print(message)
+    return segment_preds
 
 
+if __name__ == "__main__":
+    # 1. Configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    label_map = load_label_map("Data")
+    num_classes = len(label_map)
+    model = PowerTraceTransformer(num_classes=num_classes).to(device)
+    model.load_state_dict(torch.load("weights/best_model_bis.pth", map_location=device))
+
+    # 2. Charger le CSV d'application contenant plusieurs traces
+    app_file = os.path.join("Data", "Applications", "malfre_app.csv")
+    try:
+        df = pd.read_csv(app_file, on_bad_lines='skip')
+    except pd.errors.ParserError as e:
+        print(f"Erreur de parsing CSV : {e}")
+        exit(1)
+
+    df = df.select_dtypes(include=[np.number]).dropna(axis=1)
+    arr = df.to_numpy(dtype=np.float32)
+
+    # 3. Prétraitement et prédiction pour chaque trace
+    for idx, trace in enumerate(arr):
+        trace_norm = (trace - trace.mean()) / (trace.std() + 1e-8)
+        trace_tensor = torch.tensor(trace_norm, dtype=torch.float32).to(device)
+        segments = predict_application_function(trace_tensor, model, device)
+
+        for seg in segments:
+            func_name = label_map[seg]
+            print(f"Trace {idx+1:>2d}: fonction prédite = '{func_name}'")
