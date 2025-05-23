@@ -17,7 +17,7 @@ from analyze_attention import plot_attention_distribution
 # === Configuration du device ===
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #Charger les datasets
-full_dataset = PowerTraceDataset("Data")
+full_dataset = PowerTraceDataset("Data/Power_consumption")
 
 
 # === Split 80/20 sur le dataset complet ===
@@ -34,10 +34,10 @@ train_subset = Subset(full_dataset, train_idx)
 val_subset = Subset(full_dataset, val_idx)
 
 # === Création des DataLoaders, appliquer le sliding window sur le dataset d'entrainement ===
-train_dataset_windowed = SlidingWindowWrapper(train_subset, window_size=54, step_size=27)
+train_dataset_windowed = SlidingWindowWrapper(train_subset, window_size=100, step_size=1)
 #train_dataset_short = PaddedShortTraceDataset(train_subset)
 # Choisis le nombre de segments cibles par classe
-segments_per_class = 80  # Par exemple
+segments_per_class = 10000  # Par exemple
 
 # Crée le dataset équilibré
 balanced_dataset = BalancedSegmentDataset(
@@ -64,7 +64,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', pa
 attention_data = []
 
 # === Fonction de validation avec perte et prédiction agrégée ===
-def validate(model, val_loader, criterion, device, label_map=full_dataset.label_map, window_size=54, step_size=27):
+def validate(model, val_loader, criterion, device, label_map=full_dataset.label_map, window_size=100, step_size=50):
     model.eval()
     total = correct = 0
     val_loss = 0
@@ -202,7 +202,7 @@ for epoch in range(10):
 
     # === Validation
     val_acc, val_loss_epoch, all_preds, all_labels, attention_data = validate(
-        model, val_loader, criterion, device, window_size=54, step_size=27
+        model, val_loader, criterion, device, window_size=100, step_size=50
     )
     val_losses.append(val_loss_epoch)
 
