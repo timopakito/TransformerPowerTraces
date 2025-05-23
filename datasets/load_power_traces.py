@@ -9,7 +9,7 @@ import random
 from collections import defaultdict
 
 class PowerTraceDataset(Dataset):
-    def __init__(self, data_dir, file_suffix="_all.csv", normalize=True):
+    def __init__(self, data_dir, file_suffix=".csv", normalize=True):
         self.traces = []
         self.labels = []
         self.label_map = {}
@@ -57,7 +57,7 @@ def collate_fn(batch):
     return padded_seqs, torch.tensor(labels), attention_mask
 
 class PowerTraceDatasetSlidingWindow(Dataset):
-    def __init__(self, data_dir, file_suffix="_all.csv", normalize=True, window_size=512, step_size=256):
+    def __init__(self, data_dir, file_suffix=".csv", normalize=True, window_size=512, step_size=256):
         self.traces = []
         self.masks = []
         self.labels = []
@@ -289,3 +289,60 @@ class BalancedSegmentDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
+
+
+class SlidingWindowMultipleRandomSegments(Dataset):
+    def __init__(self, base_dataset, window_size=512, num_segments=3):
+        """
+        base_dataset : un Dataset qui retourne (trace, label)
+        window_size : taille des fenêtres extraites
+        num_segments : nombre de fenêtres aléatoires par trace
+        """
+        self.base_dataset = base_dataset
+        self.window_size = window_size
+        self.num_segments = num_segments
+
+        # Ne garde que les traces assez longues
+        self.valid_indices = []
+        for i, (trace, label) in enumerate(base_dataset):
+            if trace.size(0) >= window_size:
+                self.valid_indices.append(i)
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def __getitem__(self, idx):
+        base_idx = self.valid_indices[idx]
+        trace, label = self.base_dataset[base_idx]
+        trace = trace.squeeze(-1)  # (T,)
+        L = trace.size(0)
+
+        segments = []
+        masks = []
+
+        for _ in range(self.num_segments):
+            start = random.randint(0, L - self.window_size)
+            segment = trace[start:start + self.window_size].unsqueeze(-1)  # (512, 1)
+            mask = torch.ones(self.window_size, dtype=torch.bool)
+            segments.append(segment)
+            masks.append(mask)
+
+        # Empile les k segments pour avoir un batch interne : (k, window_size, 1)
+        return torch.stack(segments), label, torch.stack(masks)
+
+def collate_fn_multi_segments(batch):
+    all_traces = []
+    all_labels = []
+    all_masks = []
+
+    for segments, label, masks in batch:
+        k = segments.size(0)
+        all_traces.append(segments)                      # (k, T, 1)
+        all_labels.extend([label] * k)                   # répéter le label k fois
+        all_masks.append(masks)                          # (k, T)
+
+    traces = torch.cat(all_traces, dim=0)                # (B*k, T, 1)
+    masks = torch.cat(all_masks, dim=0)                  # (B*k, T)
+    labels = torch.tensor(all_labels, dtype=torch.long)  # (B*k,)
+
+    return traces, labels, masks
